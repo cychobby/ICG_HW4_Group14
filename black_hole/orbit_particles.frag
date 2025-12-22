@@ -2,6 +2,7 @@
 
 in vec2  vUV;
 in float vT;
+in float vAgeSec;
 
 out vec4 FragColor;
 
@@ -15,8 +16,12 @@ void main() {
     float t = clamp(vT, 0.0, 1.0);
     float age = 1.0 - t;
 
-    // 讓尾巴不要直接歸零：至少保留 0.25 的亮度
-    float alpha = mask * (0.25 + 0.75 * age);
+    // 依時間衰減：k 越大淡得越快
+    const float k = 0.5; // 每秒衰減係數，可調
+    float timeFade = exp(-k * vAgeSec);
+
+    // 讓尾巴不要直接歸零：至少保留 0.25 的亮度，然後再乘時間衰減
+    float alpha = mask * (0.25 + 0.75 * age) * timeFade;
 
     vec3 headCol = vec3(1.0, 0.95, 0.2);
     vec3 tailCol = vec3(1.0, 0.25, 0.05);

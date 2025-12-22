@@ -7,9 +7,13 @@ uniform mat4 viewProj;
 uniform float uSizeWorld;     // 粒子在 world space 的大小（會依年齡縮放）
 uniform int   uPointCount;    // trail 長度（用來算 fade）
 uniform vec3  uCamPos;        // 用來做 billboard
+uniform float uTime;          // 當前時間（秒），用來計算存活時間
+
+in float vSpawnTime[];
 
 out vec2  vUV;
 out float vT;                 // 0(舊) -> 1(新)
+out float vAgeSec;            // 存活秒數
 
 void main() {
     vec3 center = gl_in[0].gl_Position.xyz;
@@ -26,6 +30,7 @@ void main() {
     }
     float age = 1.0 - t;                 // 新的點 age 越大
     float size = uSizeWorld * mix(0.25, 1.0, age);
+    float ageSec = max(0.0, uTime - vSpawnTime[0]); // 依實時間衰減
 
     vec3 p0 = center + (-right - up) * size;
     vec3 p1 = center + ( right - up) * size;
@@ -33,6 +38,7 @@ void main() {
     vec3 p3 = center + ( right + up) * size;
 
     vT  = t;
+    vAgeSec = ageSec;
 
     vUV = vec2(0, 0); gl_Position = viewProj * vec4(p0, 1.0); EmitVertex();
     vUV = vec2(1, 0); gl_Position = viewProj * vec4(p1, 1.0); EmitVertex();

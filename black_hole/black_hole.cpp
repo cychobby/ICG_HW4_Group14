@@ -142,7 +142,7 @@ struct ObjectData {
     vec3 velocity = vec3(0.0f, 0.0f, 0.0f); // Initial velocity
 };
 vector<ObjectData> objects = {
-    { vec4(4e11f, 0.0f, 0.0f, 4e10f)   , vec4(1,1,0,1), 1.98892e30 },
+    { vec4(4e11f, 0.0f, 0.0f, 7e10f)   , vec4(1,1,0,1), 1.98892e30 },
     { vec4(0.0f, 0.0f, 4e11f, 4e10f)   , vec4(1,0,0,1), 1.98892e30 },
     { vec4(0.0f, 0.0f, 0.0f, SagA.r_s) , vec4(0,0,0,1), static_cast<float>(SagA.mass)  },
     //{ vec4(6e10f, 0.0f, 0.0f, 5e10f), vec4(0,1,0,1) }
@@ -163,7 +163,7 @@ struct Engine {
     GLuint orbitVBO = 0;
     int   orbitPointCount = 512;
     float orbitParticleSize = 2e9f;   // 可自行調整大小
-    vector<vec3> orbitTrail;
+    vector<vec4> orbitTrail;          // xyz = pos, w = spawn time (seconds)
 
     // -- UBOs -- //
     GLuint cameraUBO = 0;
@@ -243,15 +243,15 @@ struct Engine {
         this->texture = result[1];
 
         // (新增) orbit trail VBO/VAO
-        orbitTrail.assign(orbitPointCount, vec3(objects[1].posRadius)); // 先全部填同一點，避免第一幀拉一條超長線
+        orbitTrail.assign(orbitPointCount, vec4(vec3(objects[1].posRadius), 0.0f)); // 先全部填同一點，避免第一幀拉一條超長線
         glGenVertexArrays(1, &orbitVAO);
         glGenBuffers(1, &orbitVBO);
 
         glBindVertexArray(orbitVAO);
         glBindBuffer(GL_ARRAY_BUFFER, orbitVBO);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(vec3) * orbitTrail.size(), orbitTrail.data(), GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0); // layout(location=0) in vec3 aPos;
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vec3), (void*)0);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(vec4) * orbitTrail.size(), orbitTrail.data(), GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0); // layout(location=0) in vec4 aPosTime (xyz,pos; w,time)
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(vec4), (void*)0);
         glBindVertexArray(0);
         
     }
@@ -353,19 +353,19 @@ struct Engine {
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 6);  // 2 triangles
         glEnable(GL_DEPTH_TEST);
     }
-    void pushOrbitTrailSample(const vec3& p) {
+    void pushOrbitTrailSample(const vec3& p, float nowSeconds) {
         // 你的 geom shader 用 age = 1 - t，而 t 由 gl_PrimitiveIDIn 來
         // 所以我們讓「最新的點」放在 index 0，越舊的點往後推
         for (int i = orbitPointCount - 1; i > 0; --i) {
             orbitTrail[i] = orbitTrail[i - 1];
         }
-        orbitTrail[0] = p;
+        orbitTrail[0] = vec4(p, nowSeconds);
 
         glBindBuffer(GL_ARRAY_BUFFER, orbitVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vec3) * orbitTrail.size(), orbitTrail.data());
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vec4) * orbitTrail.size(), orbitTrail.data());
     }
 
-    void drawOrbitTrail(const mat4& viewProj, const vec3& camPos) {
+    void drawOrbitTrail(const mat4& viewProj, const vec3& camPos, float nowSeconds) {
         glUseProgram(orbitShaderProgram);
 
         glUniformMatrix4fv(glGetUniformLocation(orbitShaderProgram, "viewProj"),
@@ -373,6 +373,7 @@ struct Engine {
         glUniform1f(glGetUniformLocation(orbitShaderProgram, "uSizeWorld"), orbitParticleSize);
         glUniform1i(glGetUniformLocation(orbitShaderProgram, "uPointCount"), orbitPointCount);
         glUniform3fv(glGetUniformLocation(orbitShaderProgram, "uCamPos"), 1, value_ptr(camPos));
+        glUniform1f(glGetUniformLocation(orbitShaderProgram, "uTime"), nowSeconds);
 
         glBindVertexArray(orbitVAO);
 
@@ -817,7 +818,7 @@ int main() {
         }
 
 
-        engine.pushOrbitTrailSample(vec3(objects[1].posRadius));
+        engine.pushOrbitTrailSample(vec3(objects[1].posRadius), float(now));
 
         // ---------- GRID ------------- //
         // 2) rebuild grid mesh on CPU
@@ -833,7 +834,7 @@ int main() {
         engine.dispatchCompute(camera);
         engine.drawFullScreenQuad();
 
-        engine.drawOrbitTrail(viewProj, camera.position());
+        engine.drawOrbitTrail(viewProj, camera.position(), float(now));
 
         // 6) present to screen
         glfwSwapBuffers(engine.window);
