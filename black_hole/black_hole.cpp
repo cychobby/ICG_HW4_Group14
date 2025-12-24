@@ -27,6 +27,44 @@ double c = 299792458.0;
 double G = 6.67430e-11;
 struct Ray;
 bool Gravity = false;
+struct Camera;
+void spawnMeteor(const Camera& cam, bool fast);
+void updateMeteor(double dt);
+void deactivateObject(int index);
+void clearMeteorObjects();
+int allocateDynamicSlot();
+bool isDynamicIndex(int index);
+double computeTidalRatio(double distance, double mass);
+void disruptMeteor(const dvec3& pos, const dvec3& vel, const dvec3& rVec);
+bool updateDynamicBody(int index, double dt);
+
+constexpr float  METEOR_RADIUS = 3e9f;
+constexpr double METEOR_TIDAL_RADIUS = 1e8;
+constexpr double METEOR_MASS = 1e30;
+constexpr double METEOR_DESPAWN_RADIUS = 2e12;
+constexpr int    METEOR_SUBSTEPS = 128;
+constexpr double METEOR_TIME_SCALE = 1500.0;
+constexpr double METEOR_SPEED_SLOW = 0.9;
+constexpr double METEOR_SPEED_FAST = 1.1;
+constexpr double METEOR_INWARD_BIAS = 0.12;
+constexpr double METEOR_DRAG_BASE = 0.02;
+constexpr double METEOR_DRAG_NEAR = 0.6;
+constexpr int    MAX_OBJECTS = 16;
+constexpr int    BASE_OBJECTS = 3;
+constexpr float  GRID_BASE_OFFSET = -3e10f * BASE_OBJECTS;
+constexpr int    METEOR_DEBRIS_COUNT = 4;
+constexpr double METEOR_DEBRIS_RADIUS_SCALE = 0.35;
+constexpr double METEOR_DEBRIS_SPREAD = 4.0;
+constexpr double METEOR_DEBRIS_VEL_RADIAL = 0.08;
+constexpr double METEOR_DEBRIS_VEL_TANGENT = 0.05;
+constexpr double METEOR_TIDAL_THRESHOLD = 1.0;
+constexpr double METEOR_STRETCH_GAIN = 1.2;
+constexpr double METEOR_STRETCH_MAX = 3.0;
+
+int meteorIndex = -1;
+bool meteorActive = false;
+bool meteorDisrupted = false;
+vector<int> meteorDebrisIndices;
 
 struct Camera {
     // Center the camera orbit on the black hole at (0, 0, 0)
@@ -115,6 +153,10 @@ struct Camera {
             Gravity = !Gravity;
             cout << "[INFO] Gravity turned " << (Gravity ? "ON" : "OFF") << endl;
         }
+        if (action == GLFW_PRESS && key == GLFW_KEY_M) {
+            bool fast = (mods & GLFW_MOD_SHIFT) != 0;
+            spawnMeteor(*this, fast);
+        }
     }
 };
 Camera camera;
@@ -147,6 +189,304 @@ vector<ObjectData> objects = {
     { vec4(0.0f, 0.0f, 0.0f, SagA.r_s) , vec4(0,0,0,1), static_cast<float>(SagA.mass)  },
     //{ vec4(6e10f, 0.0f, 0.0f, 5e10f), vec4(0,1,0,1) }
 };
+void deactivateObject(int index) {
+    if (index < 0 || index >= static_cast<int>(objects.size())) {
+        return;
+    }
+    ObjectData& obj = objects[index];
+    obj.mass = 0.0f;
+    obj.posRadius.w = 0.0f;
+    obj.color.w = 0.0f;
+    obj.velocity = vec3(0.0f);
+}
+void clearMeteorObjects() {
+    if (meteorIndex >= 0) {
+        deactivateObject(meteorIndex);
+    }
+    for (int idx : meteorDebrisIndices) {
+        if (idx != meteorIndex) {
+            deactivateObject(idx);
+        }
+    }
+    meteorDebrisIndices.clear();
+    meteorActive = false;
+    meteorDisrupted = false;
+}
+int allocateDynamicSlot() {
+    for (int i = BASE_OBJECTS; i < static_cast<int>(objects.size()); ++i) {
+        if (objects[i].mass == 0.0f && objects[i].posRadius.w == 0.0f) {
+            return i;
+        }
+    }
+    if (static_cast<int>(objects.size()) >= MAX_OBJECTS) {
+        return -1;
+    }
+    objects.push_back({ vec4(0.0f), vec4(0.0f), 0.0f, vec3(0.0f) });
+    return static_cast<int>(objects.size() - 1);
+}
+bool isDynamicIndex(int index) {
+    if (index == meteorIndex) {
+        return true;
+    }
+    for (int idx : meteorDebrisIndices) {
+        if (idx == index) {
+            return true;
+        }
+    }
+    return false;
+}
+double computeTidalRatio(double distance, double mass) {
+    if (distance <= 0.0 || mass <= 0.0) {
+        return 0.0;
+    }
+    double r = METEOR_TIDAL_RADIUS;
+    double r3 = r * r * r;
+    double d3 = distance * distance * distance;
+    return (2.0 * SagA.mass * r3) / (mass * d3);
+}
+void spawnMeteor(const Camera& cam, bool fast) {
+    vec3 camPos = cam.position();
+    double camR = glm::length(camPos);
+    if (camR <= 0.0) {
+        return;
+    }
+
+    clearMeteorObjects();
+    if (meteorIndex < BASE_OBJECTS || meteorIndex >= static_cast<int>(objects.size())) {
+        meteorIndex = -1;
+    }
+    if (meteorIndex < 0) {
+        meteorIndex = allocateDynamicSlot();
+        if (meteorIndex < 0) {
+            cout << "[WARN] No free slot for meteor\n";
+            return;
+        }
+    }
+
+    double spawnR = camR * 0.8;
+    if (spawnR < SagA.r_s * 3.0) {
+        spawnR = SagA.r_s * 3.0;
+    }
+    vec3 radial = normalize(camPos);
+    vec3 forward = normalize(cam.target - camPos);
+    vec3 up = vec3(0.0f, 1.0f, 0.0f);
+    vec3 right = normalize(cross(forward, up));
+    if (glm::length(right) < 1e-5f) {
+        right = vec3(1.0f, 0.0f, 0.0f);
+    }
+    vec3 spawnPos = radial * float(spawnR) + right * float(camR * 0.05);
+
+    dvec3 rVec = dvec3(spawnPos) - dvec3(SagA.position);
+    double rLen = glm::length(rVec);
+    if (rLen <= SagA.r_s) {
+        rVec = dvec3(radial) * (SagA.r_s * 3.0);
+        spawnPos = vec3(rVec);
+        rLen = glm::length(rVec);
+    }
+    dvec3 rHat = rVec / rLen;
+    dvec3 tangent = cross(dvec3(0.0, 1.0, 0.0), rHat);
+    double tLen = glm::length(tangent);
+    if (tLen < 1e-6) {
+        tangent = cross(dvec3(1.0, 0.0, 0.0), rHat);
+        tLen = glm::length(tangent);
+    }
+    tangent /= tLen;
+
+    double vCirc = sqrt(G * SagA.mass / rLen);
+    double speedFactor = fast ? METEOR_SPEED_FAST : METEOR_SPEED_SLOW;
+    dvec3 v = tangent * (vCirc * speedFactor);
+    if (!fast) {
+        v -= rHat * (vCirc * METEOR_INWARD_BIAS);
+    }
+
+    ObjectData meteor;
+    meteor.posRadius = vec4(vec3(spawnPos), METEOR_RADIUS);
+    meteor.color = vec4(0.9f, 0.9f, 1.0f, 1.0f);
+    meteor.mass = static_cast<float>(METEOR_MASS);
+    meteor.velocity = vec3(v);
+
+    objects[meteorIndex] = meteor;
+    meteorActive = true;
+    meteorDisrupted = false;
+    cout << "[INFO] Meteor spawned (" << (fast ? "fast" : "slow") << ")\n";
+}
+void disruptMeteor(const dvec3& pos, const dvec3& vel, const dvec3& rVec) {
+    if (meteorIndex < 0) {
+        return;
+    }
+    double totalMass = objects[meteorIndex].mass;
+    if (totalMass <= 0.0) {
+        return;
+    }
+
+    meteorDisrupted = true;
+    meteorDebrisIndices.clear();
+
+    dvec3 rHat = normalize(rVec);
+    dvec3 tHat = cross(dvec3(0.0, 1.0, 0.0), rHat);
+    if (glm::length(tHat) < 1e-6) {
+        tHat = cross(dvec3(1.0, 0.0, 0.0), rHat);
+    }
+    tHat = normalize(tHat);
+    dvec3 bHat = normalize(cross(rHat, tHat));
+
+    double rLen = glm::length(rVec);
+    double vCirc = sqrt(G * SagA.mass / rLen);
+    double spread = METEOR_DEBRIS_SPREAD * METEOR_RADIUS;
+    double velRad = vCirc * METEOR_DEBRIS_VEL_RADIAL;
+    double velTan = vCirc * METEOR_DEBRIS_VEL_TANGENT;
+    int count = METEOR_DEBRIS_COUNT;
+    if (count < 1) {
+        count = 1;
+    }
+    double fragMass = totalMass / double(count);
+
+    for (int i = 0; i < count; ++i) {
+        double t = (count == 1) ? 0.0 : (double(i) / double(count - 1) - 0.5);
+        dvec3 offset = rHat * (t * spread) + bHat * (t * spread * 0.2);
+        dvec3 fragPos = pos + offset;
+        dvec3 fragVel = vel + rHat * (t * velRad) + tHat * (t * velTan);
+
+        ObjectData frag;
+        frag.posRadius = vec4(vec3(fragPos), float(METEOR_RADIUS * METEOR_DEBRIS_RADIUS_SCALE));
+        frag.color = vec4(1.0f, 0.85f, 0.6f, 1.0f);
+        frag.mass = static_cast<float>(fragMass);
+        frag.velocity = vec3(fragVel);
+
+        int slot = (i == 0) ? meteorIndex : allocateDynamicSlot();
+        if (slot < 0) {
+            continue;
+        }
+        objects[slot] = frag;
+        meteorDebrisIndices.push_back(slot);
+    }
+    meteorActive = true;
+}
+bool updateDynamicBody(int index, double dt) {
+    if (index < 0 || index >= static_cast<int>(objects.size())) {
+        return false;
+    }
+    ObjectData& body = objects[index];
+    if (body.posRadius.w <= 0.0f || body.mass <= 0.0f) {
+        return false;
+    }
+
+    double scaledDt = dt * METEOR_TIME_SCALE;
+    if (scaledDt <= 0.0) {
+        return true;
+    }
+
+    dvec3 center = dvec3(SagA.position);
+    dvec3 pos = dvec3(vec3(body.posRadius));
+    dvec3 vel = dvec3(body.velocity);
+
+    double h = scaledDt / double(METEOR_SUBSTEPS);
+    for (int step = 0; step < METEOR_SUBSTEPS; ++step) {
+        dvec3 rVec = pos - center;
+        double rLen = glm::length(rVec);
+        if (rLen <= SagA.r_s) {
+            deactivateObject(index);
+            return false;
+        }
+
+        double invR = 1.0 / rLen;
+        dvec3 grav = -(G * SagA.mass) * (rVec * (invR * invR * invR));
+        double rScale = SagA.r_s * invR;
+        double drag = METEOR_DRAG_BASE + METEOR_DRAG_NEAR * (rScale * rScale);
+        double damp = 1.0 - drag * h;
+        if (damp < 0.0) {
+            damp = 0.0;
+        }
+
+        vel = vel * damp + grav * h;
+        pos += vel * h;
+
+        double nextR = glm::length(pos - center);
+        if (nextR > METEOR_DESPAWN_RADIUS) {
+            deactivateObject(index);
+            return false;
+        }
+    }
+
+    body.velocity = vec3(vel);
+    body.posRadius = vec4(vec3(pos), body.posRadius.w);
+    return true;
+}
+void updateMeteor(double dt) {
+    if (!meteorActive || meteorIndex < 0) {
+        return;
+    }
+
+    if (meteorDisrupted) {
+        bool anyActive = false;
+        for (int idx : meteorDebrisIndices) {
+            if (updateDynamicBody(idx, dt)) {
+                anyActive = true;
+            }
+        }
+        if (!anyActive) {
+            clearMeteorObjects();
+        }
+        return;
+    }
+
+    ObjectData& meteor = objects[meteorIndex];
+    if (meteor.posRadius.w <= 0.0f || meteor.mass <= 0.0f) {
+        meteorActive = false;
+        return;
+    }
+
+    double scaledDt = dt * METEOR_TIME_SCALE;
+    if (scaledDt <= 0.0) {
+        return;
+    }
+
+    dvec3 center = dvec3(SagA.position);
+    dvec3 pos = dvec3(vec3(meteor.posRadius));
+    dvec3 vel = dvec3(meteor.velocity);
+
+    double h = scaledDt / double(METEOR_SUBSTEPS);
+    double stretchScale = 1.0;
+    for (int step = 0; step < METEOR_SUBSTEPS; ++step) {
+        dvec3 rVec = pos - center;
+        double rLen = glm::length(rVec);
+        if (rLen <= SagA.r_s) {
+            clearMeteorObjects();
+            return;
+        }
+
+        double ratio = computeTidalRatio(rLen, meteor.mass);
+        stretchScale = 1.0 + METEOR_STRETCH_GAIN * ratio;
+        if (stretchScale > METEOR_STRETCH_MAX) {
+            stretchScale = METEOR_STRETCH_MAX;
+        }
+        if (ratio >= METEOR_TIDAL_THRESHOLD) {
+            disruptMeteor(pos, vel, rVec);
+            return;
+        }
+
+        double invR = 1.0 / rLen;
+        dvec3 grav = -(G * SagA.mass) * (rVec * (invR * invR * invR));
+        double rScale = SagA.r_s * invR;
+        double drag = METEOR_DRAG_BASE + METEOR_DRAG_NEAR * (rScale * rScale);
+        double damp = 1.0 - drag * h;
+        if (damp < 0.0) {
+            damp = 0.0;
+        }
+
+        vel = vel * damp + grav * h;
+        pos += vel * h;
+
+        double nextR = glm::length(pos - center);
+        if (nextR > METEOR_DESPAWN_RADIUS) {
+            clearMeteorObjects();
+            return;
+        }
+    }
+
+    meteor.velocity = vec3(vel);
+    meteor.posRadius = vec4(vec3(pos), float(METEOR_RADIUS * stretchScale));
+}
 
 struct Engine {
     GLuint gridShaderProgram;
@@ -267,13 +607,19 @@ struct Engine {
                 float worldX = (x - gridSize / 2) * spacing;
                 float worldZ = (z - gridSize / 2) * spacing;
 
-                float y = 0.0f;
+                float y = GRID_BASE_OFFSET;
 
                 // ✅ Warp grid using Schwarzschild geometry
-                for (const auto& obj : objects) {
+                for (size_t objIndex = 0; objIndex < objects.size(); ++objIndex) {
+                    if (isDynamicIndex(static_cast<int>(objIndex))) {
+                        continue;
+                    }
+                    const auto& obj = objects[objIndex];
+                    if (obj.mass <= 0.0f) {
+                        continue;
+                    }
                     vec3 objPos = vec3(obj.posRadius);
                     double mass = obj.mass;
-                    double radius = obj.posRadius.w;
 
                     double r_s = 2.0 * G * mass / (c * c);
                     double dx = worldX - objPos.x;
@@ -283,10 +629,10 @@ struct Engine {
                     // prevent sqrt of negative or divide-by-zero (inside or at the black hole center)
                     if (dist > r_s) {
                         double deltaY = 2.0 * sqrt(r_s * (dist - r_s));
-                        y += static_cast<float>(deltaY) - 3e10f;
+                        y += static_cast<float>(deltaY);
                     } else {
-                        // 🔴 For points inside or at r_s: make it dip down sharply
-                        y += 2.0f * static_cast<float>(sqrt(r_s * r_s)) - 3e10f;  // or add a deep pit
+                        // ?? For points inside or at r_s: make it dip down sharply
+                        y += 2.0f * static_cast<float>(sqrt(r_s * r_s));  // or add a deep pit
                     }
                 }
 
@@ -771,34 +1117,40 @@ int main() {
 
         double now   = glfwGetTime();
         double dt    = now - lastTime;   // seconds since last frame
+        if (dt > 0.05) {
+            dt = 0.05;
+        }
         lastTime     = now;
 
         // Gravity
-        for (auto& obj : objects) {
-            for (auto& obj2 : objects) {
-                if (&obj == &obj2) continue; // skip self-interaction
-                 float dx  = obj2.posRadius.x - obj.posRadius.x;
-                 float dy = obj2.posRadius.y - obj.posRadius.y;
-                 float dz = obj2.posRadius.z - obj.posRadius.z;
-                 float distance = sqrt(dx * dx + dy * dy + dz * dz);
-                 if (distance > 0) {
-                        vector<double> direction = {dx / distance, dy / distance, dz / distance};
-                        //distance *= 1000;
-                        double Gforce = (G * obj.mass * obj2.mass) / (distance * distance);
+        for (size_t i = 0; i < objects.size(); ++i) {
+            if (isDynamicIndex(static_cast<int>(i))) continue;
+            for (size_t j = 0; j < objects.size(); ++j) {
+                if (i == j || isDynamicIndex(static_cast<int>(j))) continue; // skip self and meteor/debris
+                auto& obj = objects[i];
+                auto& obj2 = objects[j];
+                float dx  = obj2.posRadius.x - obj.posRadius.x;
+                float dy = obj2.posRadius.y - obj.posRadius.y;
+                float dz = obj2.posRadius.z - obj.posRadius.z;
+                float distance = sqrt(dx * dx + dy * dy + dz * dz);
+                if (distance > 0) {
+                    vector<double> direction = {dx / distance, dy / distance, dz / distance};
+                    //distance *= 1000;
+                    double Gforce = (G * obj.mass * obj2.mass) / (distance * distance);
 
-                        double acc1 = Gforce / obj.mass;
-                        std::vector<double> acc = {direction[0] * acc1, direction[1] * acc1, direction[2] * acc1};
-                        if (Gravity) {
-                            obj.velocity.x += acc[0];
-                            obj.velocity.y += acc[1];
-                            obj.velocity.z += acc[2];
+                    double acc1 = Gforce / obj.mass;
+                    std::vector<double> acc = {direction[0] * acc1, direction[1] * acc1, direction[2] * acc1};
+                    if (Gravity) {
+                        obj.velocity.x += acc[0];
+                        obj.velocity.y += acc[1];
+                        obj.velocity.z += acc[2];
 
-                            obj.posRadius.x += obj.velocity.x;
-                            obj.posRadius.y += obj.velocity.y;
-                            obj.posRadius.z += obj.velocity.z;
-                            cout << "velocity: " <<obj.velocity.x<<", " <<obj.velocity.y<<", " <<obj.velocity.z<<endl;
-                        }
+                        obj.posRadius.x += obj.velocity.x;
+                        obj.posRadius.y += obj.velocity.y;
+                        obj.posRadius.z += obj.velocity.z;
+                        cout << "velocity: " <<obj.velocity.x<<", " <<obj.velocity.y<<", " <<obj.velocity.z<<endl;
                     }
+                }
             }
         }
         
@@ -818,6 +1170,7 @@ int main() {
         }
 
 
+        updateMeteor(dt);
         engine.pushOrbitTrailSample(vec3(objects[1].posRadius), float(now));
 
         // ---------- GRID ------------- //
