@@ -43,7 +43,7 @@ constexpr double METEOR_TIDAL_RADIUS = 1e8;
 constexpr double METEOR_MASS = 1e30;
 constexpr double METEOR_DESPAWN_RADIUS = 2e12;
 constexpr int    METEOR_SUBSTEPS = 128;
-constexpr double METEOR_TIME_SCALE = 1500.0;
+constexpr double METEOR_TIME_SCALE = 6000.0;
 constexpr double METEOR_SPEED_SLOW = 0.9;
 constexpr double METEOR_SPEED_FAST = 1.1;
 constexpr double METEOR_INWARD_BIAS = 0.12;
@@ -505,6 +505,14 @@ struct Engine {
     float orbitParticleSize = 2e9f;   // 可自行調整大小
     vector<vec4> orbitTrail;          // xyz = pos, w = spawn time (seconds)
 
+    // -- Meteor trail (separate so meteor can have different size/color) -- //
+    GLuint meteorOrbitVAO = 0;
+    GLuint meteorOrbitVBO = 0;
+    vector<vec4> meteorTrail;         // xyz = pos, w = spawn time (seconds)
+    float meteorParticleSize = 4e9f;  // meteor particles larger by default
+    vec3 meteorHeadColor = vec3(1.0, 0.98, 0.95);
+    vec3 meteorTailColor = vec3(1.0, 0.25, 0.05);
+
     // -- UBOs -- //
     GLuint cameraUBO = 0;
     GLuint diskUBO = 0;
@@ -594,6 +602,16 @@ struct Engine {
         glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(vec4), (void*)0);
         glBindVertexArray(0);
         
+        // (新增) meteor trail VBO/VAO (同樣格式，但獨立緩衝區)
+        meteorTrail.assign(orbitPointCount, vec4(vec3(0.0f), 0.0f));
+        glGenVertexArrays(1, &meteorOrbitVAO);
+        glGenBuffers(1, &meteorOrbitVBO);
+        glBindVertexArray(meteorOrbitVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, meteorOrbitVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(vec4) * meteorTrail.size(), meteorTrail.data(), GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(vec4), (void*)0);
+        glBindVertexArray(0);
     }
     void generateGrid(const vector<ObjectData>& objects) {
         const int gridSize = 25;
@@ -711,6 +729,17 @@ struct Engine {
         glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vec4) * orbitTrail.size(), orbitTrail.data());
     }
 
+    // 新增：meteor trail push
+    void pushMeteorTrailSample(const vec3& p, float nowSeconds) {
+        for (int i = orbitPointCount - 1; i > 0; --i) {
+            meteorTrail[i] = meteorTrail[i - 1];
+        }
+        meteorTrail[0] = vec4(p, nowSeconds);
+
+        glBindBuffer(GL_ARRAY_BUFFER, meteorOrbitVBO);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vec4) * meteorTrail.size(), meteorTrail.data());
+    }
+
     void drawOrbitTrail(const mat4& viewProj, const vec3& camPos, float nowSeconds) {
         glUseProgram(orbitShaderProgram);
 
@@ -721,11 +750,42 @@ struct Engine {
         glUniform3fv(glGetUniformLocation(orbitShaderProgram, "uCamPos"), 1, value_ptr(camPos));
         glUniform1f(glGetUniformLocation(orbitShaderProgram, "uTime"), nowSeconds);
 
+        // set default colours for non-meteor trail
+        glUniform3f(glGetUniformLocation(orbitShaderProgram, "uHeadColor"), 1.0f, 0.95f, 0.2f);
+        glUniform3f(glGetUniformLocation(orbitShaderProgram, "uTailColor"), 1.0f, 0.25f, 0.05f);
+
         glBindVertexArray(orbitVAO);
 
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE); // 加色發光
+
+        glDrawArrays(GL_POINTS, 0, orbitPointCount);
+
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glBindVertexArray(0);
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    // 新增：draw meteor trail using independent VBO/VAO and custom colors
+    void drawMeteorTrail(const mat4& viewProj, const vec3& camPos, float nowSeconds) {
+        glUseProgram(orbitShaderProgram);
+
+        glUniformMatrix4fv(glGetUniformLocation(orbitShaderProgram, "viewProj"),
+                        1, GL_FALSE, value_ptr(viewProj));
+        glUniform1f(glGetUniformLocation(orbitShaderProgram, "uSizeWorld"), meteorParticleSize);
+        glUniform1i(glGetUniformLocation(orbitShaderProgram, "uPointCount"), orbitPointCount);
+        glUniform3fv(glGetUniformLocation(orbitShaderProgram, "uCamPos"), 1, value_ptr(camPos));
+        glUniform1f(glGetUniformLocation(orbitShaderProgram, "uTime"), nowSeconds);
+        // set custom colours for meteor
+        glUniform3fv(glGetUniformLocation(orbitShaderProgram, "uHeadColor"), 1, value_ptr(meteorHeadColor));
+        glUniform3fv(glGetUniformLocation(orbitShaderProgram, "uTailColor"), 1, value_ptr(meteorTailColor));
+
+        glBindVertexArray(meteorOrbitVAO);
+
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE); // additive glow for meteor
 
         glDrawArrays(GL_POINTS, 0, orbitPointCount);
 
@@ -1172,6 +1232,9 @@ int main() {
 
         updateMeteor(dt);
         engine.pushOrbitTrailSample(vec3(objects[1].posRadius), float(now));
+        if (meteorActive && meteorIndex >= 0) {
+            engine.pushMeteorTrailSample(vec3(objects[meteorIndex].posRadius), float(now));
+        }
 
         // ---------- GRID ------------- //
         // 2) rebuild grid mesh on CPU
@@ -1188,6 +1251,9 @@ int main() {
         engine.drawFullScreenQuad();
 
         engine.drawOrbitTrail(viewProj, camera.position(), float(now));
+        if (meteorActive && meteorIndex >= 0) {
+            engine.drawMeteorTrail(viewProj, camera.position(), float(now));
+        }
 
         // 6) present to screen
         glfwSwapBuffers(engine.window);

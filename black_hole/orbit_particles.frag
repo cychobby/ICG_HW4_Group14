@@ -6,6 +6,10 @@ in float vAgeSec;
 
 out vec4 FragColor;
 
+// Allow external control of particle colors (meteor vs default)
+uniform vec3 uHeadColor;
+uniform vec3 uTailColor;
+
 void main() {
     vec2 p  = vUV * 2.0 - 1.0;
     float r2 = dot(p, p);
@@ -23,8 +27,8 @@ void main() {
     // 讓尾巴不要直接歸零：至少保留 0.25 的亮度，然後再乘時間衰減
     float alpha = mask * (0.25 + 0.75 * age) * timeFade;
 
-    vec3 headCol = vec3(1.0, 0.95, 0.2);
-    vec3 tailCol = vec3(1.0, 0.25, 0.05);
+    vec3 headCol = uHeadColor;
+    vec3 tailCol = uTailColor;
 
     // 讓顏色過渡更「慢」
     vec3 col = mix(tailCol, headCol, sqrt(age));
