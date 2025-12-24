@@ -565,6 +565,11 @@ struct Engine {
             "orbit_particles.frag"
         );
         
+        GLint uModeLoc = glGetUniformLocation(orbitShaderProgram, "uMode");
+        if (uModeLoc < 0) {
+            std::cerr << "[WARN] uMode uniform not found (check orbit_particles.geom has 'uniform int uMode;')\n";
+        }
+
         computeProgram = CreateComputeProgram("geodesic.comp");
         glGenBuffers(1, &cameraUBO);
         glBindBuffer(GL_UNIFORM_BUFFER, cameraUBO);
@@ -743,6 +748,8 @@ struct Engine {
     void drawOrbitTrail(const mat4& viewProj, const vec3& camPos, float nowSeconds) {
         glUseProgram(orbitShaderProgram);
 
+        glUniform1i(glGetUniformLocation(orbitShaderProgram, "uMode"), 1);
+
         glUniformMatrix4fv(glGetUniformLocation(orbitShaderProgram, "viewProj"),
                         1, GL_FALSE, value_ptr(viewProj));
         glUniform1f(glGetUniformLocation(orbitShaderProgram, "uSizeWorld"), orbitParticleSize);
@@ -770,6 +777,8 @@ struct Engine {
     // 新增：draw meteor trail using independent VBO/VAO and custom colors
     void drawMeteorTrail(const mat4& viewProj, const vec3& camPos, float nowSeconds) {
         glUseProgram(orbitShaderProgram);
+
+        glUniform1i(glGetUniformLocation(orbitShaderProgram, "uMode"), 0);
 
         glUniformMatrix4fv(glGetUniformLocation(orbitShaderProgram, "viewProj"),
                         1, GL_FALSE, value_ptr(viewProj));

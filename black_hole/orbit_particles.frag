@@ -15,7 +15,7 @@ void main() {
     float r2 = dot(p, p);
 
     // 邊緣柔化
-    float mask = exp(-4.0 * r2);
+    float mask = exp(-2.2 * r2);
 
     float t = clamp(vT, 0.0, 1.0);
     float age = 1.0 - t;
@@ -25,7 +25,7 @@ void main() {
     float timeFade = exp(-k * vAgeSec);
 
     // 讓尾巴不要直接歸零：至少保留 0.25 的亮度，然後再乘時間衰減
-    float alpha = mask * (0.25 + 0.75 * age) * timeFade;
+    float alpha = mask * (0.35 + 0.90 * age) * timeFade;
 
     vec3 headCol = uHeadColor;
     vec3 tailCol = uTailColor;
