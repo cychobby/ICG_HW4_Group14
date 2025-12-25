@@ -39,12 +39,6 @@ with GPU geodesic ray tracing and a 2D lensing demo.
 6. Build the project:
    - `cmake --build build`
 
-## Run
-- Windows: `build\\BlackHole3D.exe`, `build\\BlackHole2D.exe`
-- Linux/macOS: `./build/BlackHole3D`, `./build/BlackHole2D`
-
-Note: Shader files are copied next to the `BlackHole3D` executable after build.
-
 ### Alternative: Debian/Ubuntu apt workaround
 If you do not want to use vcpkg, install these packages and run the same CMake
 steps above:
@@ -54,3 +48,12 @@ sudo apt update
 sudo apt install build-essential cmake \
   libglew-dev libglfw3-dev libglm-dev libgl1-mesa-dev
 ```
+
+## Run
+- Windows: `build\\BlackHole3D.exe`, `build\\BlackHole2D.exe`
+- Linux/macOS: `./build/BlackHole3D`, `./build/BlackHole2D`
+
+Note: Shader files are copied next to the `BlackHole3D` executable after build.
+
+## Reference
+[Simulating Black Holes in C++](https://github.com/kavan010/black_hole)
