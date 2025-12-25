@@ -29,7 +29,7 @@ with GPU geodesic ray tracing and a 2D lensing demo.
 1. Clone the repository:
    - `git clone https://github.com/cychobby/ICG_HW4_Group14.git`
 2. CD into the newly cloned directory:
-   - `cd ./black_hole`
+   - `cd ./src`
 3. Install dependencies with vcpkg:
    - `vcpkg install`
 4. Get the vcpkg CMake toolchain file path:
